@@ -2,7 +2,10 @@ import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM
 from peft import LoraConfig, TaskType, get_peft_model
-from tqdm.auto import tqdm
+from tqdm import tqdm
+import json
+import logging
+import os
 
 class CustomCausalModel(nn.Module):
     def __init__(self, model_name, num_labels=2):
@@ -44,94 +47,40 @@ class CustomCausalModel(nn.Module):
         logits = self.classifier(hidden_states)
         return logits
 
-# def train_model(model, train_loader, optimizer, criterion, device, num_epochs=3):
-#     model.to(device)
-    
-#     # Create progress bar for epochs
-#     epoch_pbar = tqdm(range(num_epochs), desc='Epochs', position=0)
-    
-#     for epoch in epoch_pbar:
-#         model.train()
-#         train_loss = 0
-#         correct = 0
-#         total = 0
-        
-#         # Create progress bar for batches
-#         batch_pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}', 
-#                          leave=False, position=1)
-        
-#         for batch in batch_pbar:
-#             input_ids = batch['input_ids'].to(device)
-#             attention_mask = batch['attention_mask'].to(device)
-#             labels = batch['labels'].to(device)
-            
-#             optimizer.zero_grad()
-#             logits = model(input_ids, attention_mask)
-            
-#             # Get predictions
-#             predictions = torch.argmax(logits, dim=1)
-#             correct += (predictions == labels).sum().item()
-#             total += labels.size(0)
-            
-#             # Calculate loss and backpropagate
-#             loss = criterion(logits, labels)
-#             loss.backward()
-#             optimizer.step()
-            
-#             # Update batch progress bar
-#             train_loss += loss.item()
-#             current_loss = train_loss / (batch_pbar.n + 1)
-#             current_acc = 100 * correct / total
-#             batch_pbar.set_postfix({
-#                 'loss': f'{current_loss:.4f}',
-#                 'acc': f'{current_acc:.2f}%'
-#             })
-        
-#         # Calculate final metrics for the epoch
-#         train_loss = train_loss / len(train_loader)
-#         train_acc = 100 * correct / total
-        
-#         # Update epoch progress bar
-#         epoch_pbar.set_postfix({
-#             'train_loss': f'{train_loss:.4f}',
-#             'train_acc': f'{train_acc:.2f}%'
-#         })
-        
-#         batch_pbar.close()
-    
-#     epoch_pbar.close()
+def train_model(model, train_loader, optimizer, criterion, device, args, run_id):
+    metrics_history = {
+        'train_loss': [],
+        'train_acc': [],
+        'learning_rate': [],
+        'epoch': []
+    }
 
-def train_model(model, train_loader, optimizer, criterion, device, num_epochs=3, gradient_accumulation_steps=4):
     model.to(device)
+    scaler = torch.amp.GradScaler(device.type)
     
-    scaler = torch.amp.GradScaler('cuda')
-    
-    epoch_pbar = tqdm(range(num_epochs), desc='Epochs', position=0)
-    
-    for epoch in epoch_pbar:
+    for epoch in range(args.num_epochs):
         model.train()
         train_loss = 0
         correct = 0
         total = 0
         optimizer.zero_grad()
         
-        batch_pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}', 
-                         leave=False, position=1)
+        # Create progress bar for current epoch
+        pbar = tqdm(train_loader, desc=f'Epoch {epoch + 1}/{args.num_epochs}', total=len(train_loader))
         
-        for i, batch in enumerate(batch_pbar):
+        for i, batch in enumerate(pbar):
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             labels = batch['labels'].to(device)
             
-            # Updated autocast syntax
-            with torch.amp.autocast('cuda'):
+            with torch.amp.autocast(device.type):
                 logits = model(input_ids, attention_mask)
                 loss = criterion(logits, labels)
-                loss = loss / gradient_accumulation_steps
+                loss = loss / args.gradient_accumulation_steps
             
             scaler.scale(loss).backward()
             
-            if (i + 1) % gradient_accumulation_steps == 0:
+            if (i + 1) % args.gradient_accumulation_steps == 0:
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
@@ -140,11 +89,18 @@ def train_model(model, train_loader, optimizer, criterion, device, num_epochs=3,
                 predictions = torch.argmax(logits, dim=1)
                 correct += (predictions == labels).sum().item()
                 total += labels.size(0)
-                train_loss += loss.item() * gradient_accumulation_steps
+                train_loss += loss.item() * args.gradient_accumulation_steps
             
-            current_loss = train_loss / (batch_pbar.n + 1)
+            if i % 10 == 0:
+                current_loss = train_loss / (i + 1)
+                current_acc = 100 * correct / total
+                logging.info(f'Epoch {epoch + 1}, Batch {i}/{len(train_loader)}: '
+                           f'Loss = {current_loss:.4f}, Acc = {current_acc:.2f}%')
+            
+            # Update progress bar with current metrics
+            current_loss = train_loss / (i + 1)
             current_acc = 100 * correct / total
-            batch_pbar.set_postfix({
+            pbar.set_postfix({
                 'loss': f'{current_loss:.4f}',
                 'acc': f'{current_acc:.2f}%'
             })
@@ -152,26 +108,44 @@ def train_model(model, train_loader, optimizer, criterion, device, num_epochs=3,
             if i % 10 == 0:
                 torch.cuda.empty_cache()
         
-        train_loss = train_loss / len(train_loader)
-        train_acc = 100 * correct / total
+        # Close progress bar for current epoch
+        pbar.close()
         
-        epoch_pbar.set_postfix({
-            'train_loss': f'{train_loss:.4f}',
-            'train_acc': f'{train_acc:.2f}%'
-        })
+        # Print epoch summary
+        epoch_loss = train_loss / len(train_loader)
+        epoch_acc = 100 * correct / total
+
+        # Save metrics for this epoch
+        metrics_history['train_loss'].append(epoch_loss)
+        metrics_history['train_acc'].append(epoch_acc)
+        metrics_history['learning_rate'].append(optimizer.param_groups[0]['lr'])
+        metrics_history['epoch'].append(epoch + 1)
         
-        batch_pbar.close()
+        logging.info(f'Epoch {epoch + 1} Complete - '
+                    f'Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.2f}%')
+        
+        # Save metrics after each epoch
+        metrics_file = os.path.join(args.log_dir, f"{run_id}_metrics.json")
+        with open(metrics_file, 'w') as f:
+            json.dump(metrics_history, f, indent=2)
     
-    epoch_pbar.close()
+    return metrics_history
 
 def evaluate_model(model, test_loader, criterion, device):
     model.eval()
     total_loss = 0
     correct = 0
     total = 0
+
+    eval_metrics = {
+        'batch_losses': [],
+        'batch_accuracies': []
+    }
+
+    progress_bar = tqdm(test_loader, desc='Evaluating', leave=True)
     
-    with torch.amp.autocast('cuda'), torch.no_grad():
-        for batch in test_loader:
+    with torch.amp.autocast(device.type), torch.no_grad():
+        for batch in progress_bar:
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             labels = batch['labels'].to(device)
@@ -189,7 +163,18 @@ def evaluate_model(model, test_loader, criterion, device):
             # Calculate loss
             loss = criterion(logits, labels)
             total_loss += loss.item()
+            
+            # Record batch metrics
+            batch_acc = 100 * (predictions == labels).sum().item() / labels.size(0)
+            eval_metrics['batch_losses'].append(loss.item())
+            eval_metrics['batch_accuracies'].append(batch_acc)
+            
+            progress_bar.set_postfix({
+                'loss': f'{total_loss/total:.4f}',
+                'accuracy': f'{100*correct/total:.2f}%'
+            })
     
+    progress_bar.close()
     avg_loss = total_loss / len(test_loader)
     accuracy = 100 * correct / total
-    return avg_loss, accuracy
+    return avg_loss, accuracy, eval_metrics

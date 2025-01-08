@@ -1,5 +1,6 @@
+import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorWithPadding, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorWithPadding, BitsAndBytesConfig, pipeline
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, TaskType
 import bitsandbytes as bnb
 from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score, confusion_matrix
@@ -43,7 +44,7 @@ def get_max_length(texts, tokenizer):
     return max(lengths)
 
 def tokenize_function(examples, tokenizer):
-    prompt_template = "Is this statement true or false? Statement: {}\nAnswer:"
+    prompt_template = "I will provide you with a dialogue. Please determine whether or not it contains elements of mental manipulation. Just answer with 'Yes' or 'No', and don't add anything else.\n {}\nAnswer:"
     texts = [prompt_template.format(text) for text in examples['Dialogue']]
 
     batch_max_length = 1024
@@ -76,7 +77,7 @@ def tokenize_function(examples, tokenizer):
 
     return model_inputs
 
-def train_model(train_dataset, test_dataset, args):
+def train_model(train_dataset, args):
     model, tokenizer = prepare_model_and_tokenizer(args)
     
     processed_train = train_dataset.map(
@@ -112,37 +113,106 @@ def train_model(train_dataset, test_dataset, args):
     )
     
     logging.info("Starting training")
-    trainer.train()
-    
-    test_metrics = evaluate_model(model, tokenizer, test_dataset)
-    
-    return trainer, model, tokenizer, test_metrics
+    #trainer.train()
 
-def predict(text, model, tokenizer, device="cuda"):
-    prompt = f"Is this statement true or false? Statement: {text}\nAnswer:"
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True).to(device)
-    
+    return trainer, model, tokenizer
+
+def evaluate_model(text, model, tokenizer, device="cuda"):
+    prompt = f"I will provide you with a dialogue. Please determine whether or not it contains elements of mental manipulation. Just answer with 'Yes' or 'No', and don't add anything else.\n{text}\n"
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=False)
+
+    model.eval()
     with torch.no_grad():
         outputs = model.generate(
-            **inputs,
+            input_ids=inputs["input_ids"].to(device),
             max_new_tokens=5,
             num_return_sequences=1,
             temperature=0.1,
             pad_token_id=tokenizer.eos_token_id
         )
     
-    prediction = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    # Extract just the last word (true/false) from the response
-    prediction = prediction.split()[-1].lower()
+    print(outputs)
+    # Get just the generated answer part
+    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    print(response)
+    # Extract the last word and clean it
+    prediction = response[len(prompt):].strip().lower()
+    print(prediction)
     return prediction
 
+# def evaluate_model(text, model, tokenizer, device="cuda"):
+#    pipe = pipeline("text-generation", model=model, tokenizer=tokenizer, torch_dtype=torch.bfloat16, device_map="auto")
+#    messages = [
+#        {"role": "system", "content": "You are a helpful assistant that answers with only 'Yes' or 'No'."},
+#        {"role": "user", "content": f"I will provide you with a dialogue. Please determine whether or not it contains elements of mental manipulation. Just answer with 'Yes' or 'No', and don't add anything else.\n{text}"}
+#    ]
+   
+#    model.eval()
+#    with torch.no_grad():
+#        outputs = pipe(messages, max_new_tokens=5)
+#        prediction = outputs[0]["generated_text"][-1]
+#        print(prediction)
+#        #prediction = prediction.split()[0] if prediction.split() else ''
+       
+#     #    if prediction.lower() not in ['yes', 'no']:
+#     #        return None
+           
+#        return prediction
+
+# def predict(model, tokenizer, test_dataset):
+#    predictions, texts, true_labels = [], [], []
+#    invalid_count = 0
+   
+#    for item in test_dataset:
+#        pred = evaluate_model(item['Dialogue'], model, tokenizer)
+#        if pred is None:
+#            invalid_count += 1
+#            continue
+           
+#        predictions.append(1 if pred == 'yes' else 0)
+#        texts.append(item['Dialogue'])
+#        true_labels.append(int(item['label']))
+   
+#    print(f"Invalid predictions: {invalid_count}")
+#    return predictions, texts, true_labels
+
+def predict(model, tokenizer, test_dataset):
+    logging.info("Starting model evaluation")
+    predictions = list()
+    texts = list()
+    true_labels = list()
+    invalid = list()
+    invalid_count = 0
+    
+    for item in test_dataset:
+        pred = evaluate_model(item['Dialogue'], model, tokenizer)
+        # Check if prediction is valid
+        if pred.lower() not in ['yes', 'no']:
+            invalid.append(pred)
+            invalid_count += 1
+            continue
+
+        pred_num = 1 if pred.lower == 'yes' else 0 
+        predictions.append(pred_num)
+        texts.append(item['Dialogue'])
+        true_labels.append(int(item['label']))
+    
+    print(f"Invalid predictions: {invalid}")
+    print(f"Number of Invalid predictions: {invalid_count}")
+    return predictions, texts, true_labels
+
 def compute_metrics(predictions, true_labels):
-    accuracy = accuracy_score(true_labels, predictions, zero_division=0)
+    predictions = np.array(predictions, dtype=int)
+    true_labels = np.array(true_labels, dtype=int)
+    
+    accuracy = accuracy_score(true_labels, predictions)
     precision = precision_score(true_labels, predictions, zero_division=0)
     recall = recall_score(true_labels, predictions, zero_division=0)
     f1 = f1_score(true_labels, predictions, zero_division=0)
     
     metrics = {
+        'predictions': predictions.tolist(),
+        'true_labels': true_labels.tolist(),
         'accuracy': accuracy,
         'precision': precision,
         'recall': recall,
@@ -150,20 +220,4 @@ def compute_metrics(predictions, true_labels):
     }
     return metrics
 
-def evaluate_model(model, tokenizer, test_dataset):
-    logging.info("Starting model evaluation")
-    model.eval()
-    predictions = list()
-    true_labels = list()
-    
-    for item in test_dataset:
-        pred = predict(item['Dialogue'], model, tokenizer)
-        pred_num = 1 if "true" in pred.lower() else 0 
-        predictions.append(pred_num)
-        true_labels.append(item['label'])
-    
-    metrics = compute_metrics(predictions, true_labels)
-    for metric_name, value in metrics.items():
-        logging.info(f"Test {metric_name}: {value:.4f}")
-    
-    return metrics
+

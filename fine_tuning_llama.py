@@ -37,7 +37,11 @@ if __name__ == "__main__":
         logging.info(f"{arg}: {value}")
     
     train_dataset, test_dataset = data_preprocessing(args.file_name, args.train_ratio)
-    trainer, model, tokenizer, test_metrics = train_model(train_dataset, test_dataset, args)
+    trainer, model, tokenizer = train_model(train_dataset, args)
+
+    logging.info("Getting predictions and computing metrics...")
+    predictions, texts, true_labels = predict(model, tokenizer, test_dataset)
+    metrics = compute_metrics(predictions, true_labels)
     
     # Save model and metrics
     model_save_path = os.path.join(args.output_dir, "final_model")
@@ -46,6 +50,6 @@ if __name__ == "__main__":
     
     # Save test metrics
     with open(os.path.join(args.output_dir, "test_metrics.json"), "w") as f:
-        json.dump(test_metrics, f, indent=4)
+        json.dump(metrics, f, indent=4)
     
     logging.info("Training completed successfully")
