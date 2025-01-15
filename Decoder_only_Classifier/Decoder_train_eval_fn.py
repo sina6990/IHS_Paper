@@ -46,6 +46,11 @@ class CustomCausalModel(nn.Module):
         hidden_states = outputs.hidden_states[-1][:, -1, :]  # Take last token hidden state
         logits = self.classifier(hidden_states)
         return logits
+    
+    def save_pretrained(self, save_directory):
+        self.model.save_pretrained(save_directory)
+        torch.save(self.classifier.state_dict(), os.path.join(save_directory, 'classifier.pt'))
+        
 
 def train_model(model, train_loader, optimizer, criterion, device, args, run_id):
     metrics_history = {
@@ -91,11 +96,11 @@ def train_model(model, train_loader, optimizer, criterion, device, args, run_id)
                 total += labels.size(0)
                 train_loss += loss.item() * args.gradient_accumulation_steps
             
-            if i % 10 == 0:
-                current_loss = train_loss / (i + 1)
-                current_acc = 100 * correct / total
-                logging.info(f'Epoch {epoch + 1}, Batch {i}/{len(train_loader)}: '
-                           f'Loss = {current_loss:.4f}, Acc = {current_acc:.2f}%')
+            # if i % 50 == 0:
+            #     current_loss = train_loss / (i + 1)
+            #     current_acc = 100 * correct / total
+            #     logging.info(f'Epoch {epoch + 1}, Batch {i}/{len(train_loader)}: '
+            #                f'Loss = {current_loss:.4f}, Acc = {current_acc:.2f}%')
             
             # Update progress bar with current metrics
             current_loss = train_loss / (i + 1)

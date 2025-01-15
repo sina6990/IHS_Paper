@@ -48,7 +48,7 @@ if __name__ == "__main__":
     # Final evaluation
     logging.info("Performing final evaluation...")
     criterion = criterion.to(dtype=model.model.dtype)
-    final_loss, final_accuracy, eval_metrics = evaluate_model(model, test_loader, criterion, device, args)
+    final_loss, final_accuracy, eval_metrics = evaluate_model(model, test_loader, criterion, device)
     logging.info(f"Final Test Loss: {final_loss:.4f}")
     logging.info(f"Final Test Accuracy: {final_accuracy:.2f}%")
 
